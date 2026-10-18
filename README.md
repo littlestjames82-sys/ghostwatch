@@ -13,14 +13,44 @@ source hashes and symbol outlines. Later, `check` diffs the live
 project against that baseline and gives a verdict by file and by
 symbol: `fresh`, `stale`, or `unknown`.
 
+GhostWatch only *reports* freshness. It never silently refreshes a
+bundle: the bundle on disk changes only if you explicitly pass
+`--reexport`, and even then the re-export is done by GhostSlice,
+not by Watch (see Hard rules).
+
 By Ghost Developer Studio. Working name, Wave 3 companion #20 to
 GhostSlice. Full plan: [PLAN.md](PLAN.md).
+
+## Quickstart
+
+```bash
+export PYTHONPATH=src   # from this checkout; skip if installed
+
+# 1. At bundle time: record the baseline next to the project.
+python -m ghostwatch snapshot my-project
+
+# 2. Later, before reusing the saved bundle: ask for the verdict.
+python -m ghostwatch check my-project
+echo $?   # 0 = fresh, 1 = stale, 2 = unknown (could not determine)
+```
+
+That is the whole workflow. `snapshot` writes
+`my-project/.ghostwatch/snapshot.json` (hashes and symbol names
+only, never file bodies). `check` prints the verdict and names
+every file or symbol that made the bundle stale. A third command,
+`watch`, polls `check` on an interval for convenience; it is not
+a daemon and is never required.
+
+New to the details? Read on, or run the worked example in
+[examples/](examples/README.md), which walks a tiny fixture
+project from fresh to stale and back.
 
 ## Status
 
 v0.1 built and verified (Oct 14, 2026; 41 tests at build), with a
-polish round the same day (see [POLISH.md](POLISH.md)). Nothing is
-published, pushed, or priced, and no paid layer is decided.
+polish round the same day that brought the suite to 51 tests (see
+[POLISH.md](POLISH.md)). Nothing is published, pushed, or priced,
+and no paid layer is decided.
 
 ## Not GhostSlice `watch`
 
@@ -87,16 +117,22 @@ python -m ghostwatch --help
 ghostwatch snapshot <project> [--bundle <path>] [-o <snapshot.json>]
 ```
 
-Walks the project (default ignore dirs such as `.git`,
-`__pycache__`, `.claude_context`, `.ghostwatch`, `node_modules`,
-build/dist dirs, plus a lightweight `.gitignore` reader: plain
-names, directory prefixes, and `*` globs, with leading-`/`
-root-anchored and trailing-`/` directory-only patterns honoured
-and `*` never crossing a directory boundary; negations are
-ignored and `**` is collapsed to `*`, labelled lite in the
-snapshot). For each visible
-file it records relative path, size, `mtime_ns`, a sha256 of the
-source bytes, and a symbol outline:
+Walks the project and records a baseline. What is skipped:
+
+- Default ignore dirs such as `.git`, `__pycache__`,
+  `.claude_context`, `.ghostwatch`, `node_modules`, and
+  build/dist dirs. These match directory names only, so a regular
+  file named e.g. `build` is still snapshotted.
+- Anything matched by the project's `.gitignore`, read by a
+  lightweight reader (labelled `gitignore-lite` in the snapshot):
+  plain names, directory prefixes, and `*` globs, with leading-`/`
+  root-anchored and trailing-`/` directory-only patterns honoured
+  and `*` never crossing a directory boundary. Negations are
+  ignored and `**` is collapsed to `*`; this is not full gitignore
+  semantics.
+
+For each visible file it records relative path, size, `mtime_ns`,
+a sha256 of the source bytes, and a symbol outline:
 
 - Python: `ast`, top-level and nested `def` / `async def` / `class`,
   qualified names.
@@ -111,8 +147,8 @@ and its file list, so a later check can also detect the bundle
 itself being replaced.
 
 Default snapshot location: `<project>/.ghostwatch/snapshot.json`
-(see `ghostwatch snapshot --help` for the exact flags Agent A's CLI
-ships; the tests in `tests/conftest.py` are the executable record).
+(override with `-o <path>`). Run `ghostwatch snapshot --help` for
+the full flag list.
 
 ### 2. Check once
 
@@ -129,7 +165,7 @@ Every finding is classified:
 |---|---|---|
 | `changed_in_bundle` | A bundled file's content changed | Yes |
 | `changed_not_in_bundle` | An unbundled file changed | No, context only |
-| `added_not_in_bundle` | A new file the bundle never included | No, unless `--strict-added` |
+| `added_not_in_bundle` | A new file the bundle never included | No, unless `--strict-added` and the bundle manifest lists the file |
 | `removed_from_project` | A file present at snapshot is gone | Yes if it was bundled |
 | `missing_bundle_file` | A file named in the manifest is not on disk | Yes |
 | `stale_symbols` | A symbol the bundle shipped was removed/renamed | Yes |
@@ -137,6 +173,21 @@ Every finding is classified:
 Symbol staleness compares baseline symbols (or the manifest's
 `symbols_included`) with current symbols per bundled file and
 reports added / removed symbols by file.
+
+Freshness analysis (reporting only, never refreshes a bundle):
+every `check` report now carries a `freshness` object with bundle
+and snapshot age in seconds, drift (stale / total bundled files and
+ratio, context changes, touched-only count), symbol churn (removed /
+added / net, files affected), the sorted `stale_paths`, and, on a
+snapshot baseline only, a 0-100 `staleness_score` (100 = every
+bundled file still matches) with a `severity` band
+(none / low / medium / high / critical) and a plain-language
+`recommendation`. On the heuristic (no-baseline) path the score is
+`null` and severity is `unknown`: no confident number without a
+baseline. Changed / added / removed findings on a snapshot baseline
+also carry `size_before` / `size_after` / `size_delta`. The Markdown
+report renders this as a Freshness analysis section and the CLI
+summary prints the score line.
 
 Pack staleness: if the checked path is a GhostPacks Pack that
 carries or points at a bundle, the same verdict is reported as the
@@ -158,6 +209,19 @@ GhostBench) and the human report at caller-chosen paths; `--json`
 prints the full JSON report to stdout instead. Every verdict is
 reproducible from `watch-report.json` + snapshot + bundle manifest
 hash alone.
+
+What a stale verdict looks like on stdout:
+
+```
+[ghostwatch] verdict: stale (baseline: snapshot)
+  changed_in_bundle: 1
+    - src/app.py: content changed since snapshot
+```
+
+A `fresh` verdict prints just the first line, with
+`verdict: fresh`. An `unknown` verdict (no baseline snapshot, so
+the manifest heuristic ran) prints `baseline: manifest_heuristic`
+and exits 2; treat it as "no trustworthy answer", not as fresh.
 
 ### 3. Polling watch (convenience loop, no daemon)
 
@@ -214,8 +278,9 @@ Snapshot shape (versioned JSON, abbreviated):
 }
 ```
 
-`files` is an object keyed by relative path. See
-`tests/conftest.py` for the shapes the test suite pins down.
+`files` is an object keyed by relative path. The header comment in
+`tests/conftest.py` documents the exact snapshot and report shapes
+the test suite pins down, if you need them field by field.
 
 ## Out of scope for v0.1
 

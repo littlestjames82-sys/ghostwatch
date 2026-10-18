@@ -3,6 +3,14 @@
 A runnable walkthrough on a tiny fixture project. Everything is
 local; nothing here is published or sent anywhere.
 
+Each numbered step shows the command and the verdict or exit code
+to expect, so you can tell at a glance whether your run matches.
+Note what the walkthrough never does: no step refreshes the
+bundle behind your back. The only step that even attempts a
+re-export is step 7, where `--reexport` is passed explicitly,
+and it is there to show the graceful failure when GhostSlice is
+not installed.
+
 ## Layout
 
 - `fixture-project/` - two-file Python project (`src/app.py`,
@@ -29,9 +37,13 @@ export PYTHONPATH=src
 #    (Writes fixture-project/.ghostwatch/snapshot.json - hashes and
 #    symbol names only, no file bodies. Delete that folder to reset
 #    the walkthrough.)
+#    Expected output, abbreviated:
+#      [ghostwatch] snapshot: 3 file(s) hashed -> examples/fixture-project/.ghostwatch/snapshot.json
 python -m ghostwatch snapshot examples/fixture-project --bundle examples/fixture-bundle
 
 # 2. Check once: nothing has changed, so the verdict is fresh (exit 0).
+#    Expected output:
+#      [ghostwatch] verdict: fresh (baseline: snapshot)
 python -m ghostwatch check examples/fixture-project --bundle examples/fixture-bundle
 echo $?
 
@@ -39,6 +51,10 @@ echo $?
 python -m ghostwatch check examples/fixture-project --bundle examples/fixture-bundle --json | grep pack_stale
 
 # 4. Make the bundle stale: edit a bundled file's body.
+#    Expected output:
+#      [ghostwatch] verdict: stale (baseline: snapshot)
+#        changed_in_bundle: 1
+#          - src/app.py: content changed since snapshot
 printf '\n# drift\n' >> examples/fixture-project/src/app.py
 python -m ghostwatch check examples/fixture-project --bundle examples/fixture-bundle
 echo $?   # 1 = stale, src/app.py named under changed_in_bundle
